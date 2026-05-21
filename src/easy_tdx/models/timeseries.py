@@ -10,11 +10,11 @@ class MinuteBar:
     unknown_1: 协议中第二个变长整数，含义未明（疑似均价的编码形式）。
     """
 
-    price: float   # 价格
-    vol: int       # 成交量
+    price: float  # 价格
+    vol: int  # 成交量
 
     # pytdx 中被完全丢弃的字段，保留以供分析
-    unknown_1: int = field(default=0, repr=False)  # 原 reversed1
+    _unknown_1: int = field(default=0, repr=False)  # 原 reversed1
 
     _raw: bytes = field(default=b"", repr=False, compare=False)
 

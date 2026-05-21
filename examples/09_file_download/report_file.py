@@ -59,8 +59,7 @@ with TdxClient.from_best_host() as c:
     print("行业板块 (block_zs.dat)")
     print("=" * 50)
     blocks = c.get_block_info("block_zs.dat")
-    for b in blocks[:5]:
-        print(f"  {b.name:<10} 分类={b.category}  成分={b.count}")
+    print(blocks[["name", "category", "count"]].head(5).to_string(index=False))
     print(f"  ... 共 {len(blocks)} 个")
 
 # ── 2. 计算服务器：专业财务数据 ────────────────────────
@@ -74,29 +73,25 @@ calc_host = CALC_HOSTS[0]
 with TdxClient(calc_host) as c:
     # 获取文件列表
     file_list = c.get_financial_file_list()
-    for fi in file_list[:5]:
-        print(f"  {fi.filename}  {fi.filesize:>12,} 字节  hash={fi.hash[:8]}...")
+    print(file_list.head(5).to_string(index=False))
     print(f"  ... 共 {len(file_list)} 个文件")
 
     # 下载并解析最近一期有实际数据的财报
-    real_files = [f for f in file_list if f.filesize > 10000]
-    if real_files:
-        latest = real_files[0]
-        fname = f"tdxfin/{latest.filename}"
-        print(f"\n下载: {fname} ({latest.filesize:,} 字节)")
+    real_files = file_list[file_list["filesize"] > 10000]
+    if not real_files.empty:
+        latest = real_files.iloc[0]
+        fname = f"tdxfin/{latest['filename']}"
+        print(f"\n下载: {fname} ({latest['filesize']:,} 字节)")
 
         # 保存原始 .zip
         zip_data = c.get_financial_file(fname)
-        zip_path = OUTPUT_DIR / latest.filename
+        zip_path = OUTPUT_DIR / latest["filename"]
         zip_path.write_bytes(zip_data)
         print(f"  .zip 已保存到 {zip_path}")
 
         # 解析财报记录
         records = c.get_financial_records(fname)
         print(f"  解析出 {len(records)} 只股票")
-        if records:
-            for r in records[:5]:
-                print(f"    {r.market.name} {r.code}  报告期={r.report_date}  字段数={len(r.fields)}")
+        if not records.empty:
+            print(records[["market", "code", "report_date"]].head(5).to_string(index=False))
             print(f"    ... 共 {len(records)} 只")
-            r = records[0]
-            print(f"  示例: {r.market.name} {r.code}, 报告期={r.report_date}, 字段数={len(r.fields)}")

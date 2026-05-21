@@ -8,11 +8,10 @@ version = "1.0.0"
 description = "通达信 TCP 协议行情数据客户端，支持在线行情与离线本地数据读取"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["tzdata>=2024.1"]
+dependencies = ["pandas>=2.0", "tzdata>=2024.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov", "mypy>=1.9", "ruff>=0.4"]
-pandas = ["pandas>=2.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/easy_tdx"]

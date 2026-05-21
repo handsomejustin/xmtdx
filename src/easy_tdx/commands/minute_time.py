@@ -62,7 +62,7 @@ def _parse_minute_body(body: bytes, skip: int = 4) -> list[MinuteBar]:
             MinuteBar(
                 price=last_price / 100.0,
                 vol=vol,
-                unknown_1=unknown_1,
+                _unknown_1=unknown_1,
                 _raw=body[record_start:pos],
             )
         )

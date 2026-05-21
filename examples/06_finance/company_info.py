@@ -1,7 +1,6 @@
 """演示：获取公司信息目录与各个分类的详细内容。"""
 
-import pandas as pd
-from easy_tdx import TdxClient, Market
+from easy_tdx import Market, TdxClient
 
 CODE = "600519"
 NAME = "贵州茅台"
@@ -28,51 +27,36 @@ SHOW_CATEGORIES = [
 ]
 
 
-def show_categories(categories):
-    """显示公司信息目录。"""
-    df = pd.DataFrame([{
-        "目录名": cat.name,
-        "文件名": cat.filename,
-        "起始偏移": cat.start,
-        "内容长度": cat.length,
-    } for cat in categories])
-    print(f"{NAME} 公司信息目录:")
-    print(df.to_string(index=False))
-
-
 def show_category_content(client, categories, category_name, max_chars=500):
     """获取并展示指定分类的内容。"""
-    cat = next((c for c in categories if c.name == category_name), None)
-    if not cat:
+    row = categories[categories["name"] == category_name]
+    if row.empty:
         print(f"  未找到分类: {category_name}")
         return
 
+    r = row.iloc[0]
     content = client.get_company_info_content(
-        MARKET, CODE, cat.filename, cat.start, cat.length
+        MARKET, CODE, r["filename"], int(r["start"]), int(r["length"])
     )
     text = content.strip()
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n... (共 {len(content.strip())} 字，仅显示前 {max_chars} 字)"
-    print(f"\n{'='*60}")
-    print(f"【{cat.name}】 (共 {cat.length} 字节)")
-    print(f"{'='*60}")
+    print(f"\n{'=' * 60}")
+    print(f"【{r['name']}】 (共 {r['length']} 字节)")
+    print(f"{'=' * 60}")
     print(text)
-
-
-def show_all_categories(client, categories):
-    """依次展示所有 SHOW_CATEGORIES 中列出的分类内容。"""
-    for name in SHOW_CATEGORIES:
-        show_category_content(client, categories, name)
 
 
 with TdxClient.from_best_host() as c:
     categories = c.get_company_info_category(MARKET, CODE)
 
     # 1. 显示目录
-    show_categories(categories)
+    print(f"{NAME} 公司信息目录:")
+    print(categories.to_string(index=False))
 
     # 2. 显示所有分类内容（每个分类默认只显示前500字）
-    show_all_categories(c, categories)
+    for name in SHOW_CATEGORIES:
+        show_category_content(c, categories, name)
 
     # 3. 也可以单独获取某个分类的完整内容，例如：
     # show_category_content(c, categories, "公司概况", max_chars=99999)

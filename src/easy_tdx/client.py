@@ -11,6 +11,9 @@ from types import TracebackType
 from typing import TypeVar
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
+from ._df import _add_minute_datetime, _merge_bar_datetime, _merge_txn_datetime, _to_df
 from .codec.block import parse_block_dat
 from .codec.financial import parse_financial_dat, parse_financial_file_list
 from .codec.industry import parse_tdxhy_cfg
@@ -20,7 +23,7 @@ from .commands.block_info import GetBlockInfoCmd, GetBlockInfoMetaCmd
 from .commands.company_info import GetCompanyInfoCategoryCmd, GetCompanyInfoContentCmd
 from .commands.finance_info import GetFinanceInfoCmd
 from .commands.fund_flow import GetHistoryFundFlowCmd
-from .commands.minute_time import GetHistoryMinuteTimeDataCmd, GetMinuteTimeDataCmd
+from .commands.minute_time import GetHistoryMinuteTimeDataCmd
 from .commands.report_file import GetReportFileCmd
 from .commands.security_bars import GetIndexBarsCmd, GetSecurityBarsCmd
 from .commands.security_count import GetSecurityCountCmd
@@ -32,23 +35,27 @@ from .exceptions import TdxConnectionError
 from .models.bar import SecurityBar
 from .models.enums import KlineCategory, Market
 from .models.finance import (
-    CompanyInfoCategory,
-    FinanceInfo,
     FinancialFileInfo,
     FinancialRecord,
-    TdxBlock,
-    XdxrRecord,
 )
-from .models.quote import SecurityQuote
 from .models.security import SecurityInfo
 from .models.stats import FundFlow, HistoricalFundFlow, MarketStat
-from .models.timeseries import MinuteBar, TransactionRecord
+from .models.timeseries import TransactionRecord
 from .transport.async_ import AsyncTdxConnection
 from .transport.sync import CALC_HOSTS, KNOWN_HOSTS, TdxConnection, ping_all
 
 _DEFAULT_PORT = 7709
 _T = TypeVar("_T")
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_DAILY_PLUS = frozenset(
+    {
+        KlineCategory.DAY,
+        KlineCategory.WEEK,
+        KlineCategory.MONTH,
+        KlineCategory.YEAR,
+        KlineCategory.YEAR_ALT,
+    }
+)
 
 
 def _today_in_shanghai() -> int:
@@ -88,9 +95,7 @@ def _classify_fund_flow(records: list[TransactionRecord]) -> FundFlow:
 
     for record in records:
         amount = record.price * record.vol * 100.0
-        direction = (
-            "in" if record.buyorsell == 0 else "out" if record.buyorsell == 1 else None
-        )
+        direction = "in" if record.buyorsell == 0 else "out" if record.buyorsell == 1 else None
         if not direction:
             continue
 
@@ -278,11 +283,11 @@ class TdxClient:
         """获取市场证券总数。"""
         return self._execute(GetSecurityCountCmd(market))
 
-    def get_security_list(self, market: Market, start: int) -> list[SecurityInfo]:
+    def get_security_list(self, market: Market, start: int) -> pd.DataFrame:
         """获取证券列表（每页约1000条，按 start 分页）。"""
-        return self._execute(GetSecurityListCmd(market, start))
+        return _to_df(self._execute(GetSecurityListCmd(market, start)))
 
-    def get_security_list_all(self, pages: int | str = "all") -> list[SecurityInfo]:
+    def get_security_list_all(self, pages: int | str = "all") -> pd.DataFrame:
         """获取沪深 A 股完整证券列表，并自动挂载行业信息。
 
         Args:
@@ -299,7 +304,7 @@ class TdxClient:
             cached = _load_cache()
             if cached is not None:
                 log.info("从缓存加载沪深 A 股列表，共 %d 只", len(cached))
-                return cached
+                return _to_df(cached)
 
         # 计算每个市场的最大起始偏移
         def _max_start(count: int) -> int:
@@ -324,15 +329,18 @@ class TdxClient:
             total_pages = (limit + 999) // 1000
             for page_idx, start in enumerate(range(0, limit, 1000)):
                 try:
-                    stocks = self.get_security_list(market, start)
+                    stocks = self._execute(GetSecurityListCmd(market, start))
                 except Exception:
-                    log.warning("%s 第 %d/%d 页获取失败，跳过", market.name, page_idx + 1, total_pages)
+                    log.warning(
+                        "%s 第 %d/%d 页获取失败，跳过", market.name, page_idx + 1, total_pages
+                    )
                     continue
-                log.info("%s 第 %d/%d 页: %d 条", market.name, page_idx + 1, total_pages, len(stocks))
+                log.info(
+                    "%s 第 %d/%d 页: %d 条", market.name, page_idx + 1, total_pages, len(stocks)
+                )
                 for s in stocks:
-                    is_a_share = (
-                        (market == Market.SH and s.code.startswith(("60", "68")))
-                        or (market == Market.SZ and s.code.startswith(("00", "30")))
+                    is_a_share = (market == Market.SH and s.code.startswith(("60", "68"))) or (
+                        market == Market.SZ and s.code.startswith(("00", "30"))
                     )
                     if is_a_share:
                         if s.code in industry_map:
@@ -344,13 +352,11 @@ class TdxClient:
         if pages == "all":
             _save_cache(all_stocks)
 
-        return all_stocks
+        return _to_df(all_stocks)
 
-    def get_security_quotes(
-        self, stocks: list[tuple[Market, str]]
-    ) -> list[SecurityQuote]:
+    def get_security_quotes(self, stocks: list[tuple[Market, str]]) -> pd.DataFrame:
         """批量获取实时五档行情（最多80只/次）。"""
-        return self._execute(GetSecurityQuotesCmd(stocks))
+        return _to_df(self._execute(GetSecurityQuotesCmd(stocks)))
 
     def get_price_limits(
         self, market: Market, code: str, name: str, pre_close: float
@@ -363,8 +369,8 @@ class TdxClient:
         no_limit_window_days = get_no_limit_window_days(market, code, name)
         if no_limit_window_days > 0:
             try:
-                bars = self.get_security_bars(
-                    market, code, KlineCategory.DAY, 0, no_limit_window_days + 1
+                bars = self._execute(
+                    GetSecurityBarsCmd(market, code, KlineCategory.DAY, 0, no_limit_window_days + 1)
                 )
                 listed_days = len(bars)
             except Exception:
@@ -389,9 +395,10 @@ class TdxClient:
         category: KlineCategory,
         start: int,
         count: int = 800,
-    ) -> list[SecurityBar]:
+    ) -> pd.DataFrame:
         """获取 K 线数据（最多800条/次，按 start 分页）。"""
-        return self._execute(GetSecurityBarsCmd(market, code, category, start, count))
+        df = _to_df(self._execute(GetSecurityBarsCmd(market, code, category, start, count)))
+        return _merge_bar_datetime(df, category in _DAILY_PLUS)
 
     def get_index_bars(
         self,
@@ -400,30 +407,25 @@ class TdxClient:
         category: KlineCategory,
         start: int,
         count: int = 800,
-    ) -> list[SecurityBar]:
+    ) -> pd.DataFrame:
         """获取指数 K 线数据。"""
-        return self._execute(GetIndexBarsCmd(market, code, category, start, count))
+        df = _to_df(self._execute(GetIndexBarsCmd(market, code, category, start, count)))
+        return _merge_bar_datetime(df, category in _DAILY_PLUS)
 
     # ------------------------------------------------------------------ #
     # 分时
     # ------------------------------------------------------------------ #
 
-    def get_minute_time_data(self, market: Market, code: str) -> list[MinuteBar]:
-        """获取今日分时数据（240条）。"""
+    def get_minute_time_data(self, market: Market, code: str) -> pd.DataFrame:
+        """获取今日分时数据（240条，走历史分时接口）。"""
         today = _today_in_shanghai()
-        try:
-            bars = self.get_history_minute_time_data(market, code, today)
-            if bars:
-                return bars
-        except Exception:
-            pass
-        return self._execute(GetMinuteTimeDataCmd(market, code))
+        bars = self._execute(GetHistoryMinuteTimeDataCmd(market, code, today))
+        return _add_minute_datetime(_to_df(bars), today)
 
-    def get_history_minute_time_data(
-        self, market: Market, code: str, date: int
-    ) -> list[MinuteBar]:
+    def get_history_minute_time_data(self, market: Market, code: str, date: int) -> pd.DataFrame:
         """获取历史某日分时数据（date: YYYYMMDD）。"""
-        return self._execute(GetHistoryMinuteTimeDataCmd(market, code, date))
+        bars = self._execute(GetHistoryMinuteTimeDataCmd(market, code, date))
+        return _add_minute_datetime(_to_df(bars), date)
 
     # ------------------------------------------------------------------ #
     # 逐笔成交
@@ -431,45 +433,41 @@ class TdxClient:
 
     def get_transaction_data(
         self, market: Market, code: str, start: int, count: int = 800
-    ) -> list[TransactionRecord]:
+    ) -> pd.DataFrame:
         """获取当日逐笔成交（分页）。"""
-        return self._execute(GetTransactionDataCmd(market, code, start, count))
+        df = _to_df(self._execute(GetTransactionDataCmd(market, code, start, count)))
+        return _merge_txn_datetime(df, _today_in_shanghai())
 
     def get_history_transaction_data(
         self, market: Market, code: str, date: int, start: int, count: int = 800
-    ) -> list[TransactionRecord]:
+    ) -> pd.DataFrame:
         """获取历史逐笔成交（date: YYYYMMDD，分页）。"""
-        return self._execute(
-            GetHistoryTransactionDataCmd(market, code, date, start, count)
-        )
+        df = _to_df(self._execute(GetHistoryTransactionDataCmd(market, code, date, start, count)))
+        return _merge_txn_datetime(df, date)
 
     # ------------------------------------------------------------------ #
     # 财务 / 公司
     # ------------------------------------------------------------------ #
 
-    def get_xdxr_info(self, market: Market, code: str) -> list[XdxrRecord]:
+    def get_xdxr_info(self, market: Market, code: str) -> pd.DataFrame:
         """获取除权除息历史记录。"""
-        return self._execute(GetXdxrInfoCmd(market, code))
+        return _to_df(self._execute(GetXdxrInfoCmd(market, code)))
 
-    def get_finance_info(self, market: Market, code: str) -> FinanceInfo:
+    def get_finance_info(self, market: Market, code: str) -> pd.DataFrame:
         """获取最新财务数据。"""
-        return self._execute(GetFinanceInfoCmd(market, code))
+        return _to_df(self._execute(GetFinanceInfoCmd(market, code)))
 
-    def get_company_info_category(
-        self, market: Market, code: str
-    ) -> list[CompanyInfoCategory]:
+    def get_company_info_category(self, market: Market, code: str) -> pd.DataFrame:
         """获取公司信息文件目录。"""
-        return self._execute(GetCompanyInfoCategoryCmd(market, code))
+        return _to_df(self._execute(GetCompanyInfoCategoryCmd(market, code)))
 
     def get_company_info_content(
         self, market: Market, code: str, filename: str, offset: int, length: int
     ) -> str:
         """读取公司信息文本。"""
-        return self._execute(
-            GetCompanyInfoContentCmd(market, code, filename, offset, length)
-        )
+        return self._execute(GetCompanyInfoContentCmd(market, code, filename, offset, length))
 
-    def get_block_info(self, filename: str) -> list[TdxBlock]:
+    def get_block_info(self, filename: str) -> pd.DataFrame:
         """获取并解析板块文件（行业、概念、风格等）。
 
         常用文件名：
@@ -487,7 +485,7 @@ class TdxClient:
                 break
             full_data.extend(chunk)
             pos += len(chunk)
-        return parse_block_dat(bytes(full_data), filename)
+        return _to_df(parse_block_dat(bytes(full_data), filename))
 
     def get_report_file(self, filename: str) -> bytes:
         """从服务器拉取大文件（如 'base_info.zip'）。"""
@@ -527,16 +525,14 @@ class TdxClient:
         finally:
             conn.close()
 
-    def get_financial_file_list(
-        self, host: str = CALC_HOSTS[0]
-    ) -> list[FinancialFileInfo]:
+    def get_financial_file_list(self, host: str = CALC_HOSTS[0]) -> pd.DataFrame:
         """获取可用的历史专业财报文件列表。
 
         连接到计算服务器，下载 tdxfin/gpcw.txt 并解析。
         """
         data = self._download_from_host(host, "tdxfin/gpcw.txt")
         raw_list = parse_financial_file_list(data)
-        return [FinancialFileInfo(filename=f, hash=h, filesize=s) for f, h, s in raw_list]
+        return _to_df([FinancialFileInfo(filename=f, hash=h, filesize=s) for f, h, s in raw_list])
 
     def get_financial_file(self, filename: str, host: str = CALC_HOSTS[0]) -> bytes:
         """从计算服务器下载财报 zip 文件。
@@ -546,9 +542,7 @@ class TdxClient:
         """
         return self._download_from_host(host, filename)
 
-    def get_financial_records(
-        self, filename: str, host: str = CALC_HOSTS[0]
-    ) -> list[FinancialRecord]:
+    def get_financial_records(self, filename: str, host: str = CALC_HOSTS[0]) -> pd.DataFrame:
         """下载财报 zip 并解析为每只股票的记录列表。
 
         Args:
@@ -560,12 +554,12 @@ class TdxClient:
 
         zip_data = self.get_financial_file(filename, host)
         if not zip_data:
-            return []
+            return pd.DataFrame()
 
         with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
             dat_names = [n for n in zf.namelist() if n.endswith(".dat")]
             if not dat_names:
-                return []
+                return pd.DataFrame()
             dat_data = zf.read(dat_names[0])
 
         m = re.search(r"(\d{8})", filename)
@@ -576,13 +570,11 @@ class TdxClient:
         for code, market_byte, rdate, fields in raw_records:
             market = Market.SH if market_byte == b"\x01" else Market.SZ
             records.append(
-                FinancialRecord(
-                    code=code, market=market, report_date=rdate, fields=fields
-                )
+                FinancialRecord(code=code, market=market, report_date=rdate, fields=fields)
             )
-        return records
+        return _to_df(records)
 
-    def get_market_stat(self) -> MarketStat:
+    def get_market_stat(self) -> pd.DataFrame:
         """获取 A 股全市场涨跌统计概况（基于 880005 行情统计）。
 
         注意：
@@ -590,9 +582,11 @@ class TdxClient:
             用于保证计数守恒，不应视为协议已明确验证的停牌字段。
         """
         # 通达信中 880005 是全市场行情统计，880001 是总市值指数，880006 是涨跌停统计
-        quotes = self.get_security_quotes([
-            (Market.SH, "880005"), (Market.SH, "880001"), (Market.SH, "880006"),
-        ])
+        quotes = self._execute(
+            GetSecurityQuotesCmd(
+                [(Market.SH, "880005"), (Market.SH, "880001"), (Market.SH, "880006")]
+            )
+        )
         if not quotes:
             raise RuntimeError("无法获取市场统计数据")
         q = quotes[0]
@@ -603,17 +597,19 @@ class TdxClient:
         market_cap = quotes[1].price * 1e10 if len(quotes) > 1 else 0.0
         limit_down = int(quotes[2].open) if len(quotes) > 2 else 0
         limit_up = int(quotes[2].price) if len(quotes) > 2 else 0
-        return MarketStat(
-            up_count=up,
-            down_count=down,
-            neutral_count=neutral,
-            suspended_count=max(0, total - up - down - neutral),
-            total_count=total,
-            total_amount=q.amount,
-            total_volume=q.vol,
-            total_market_cap=market_cap,
-            limit_up_count=limit_up,
-            limit_down_count=limit_down,
+        return _to_df(
+            MarketStat(
+                up_count=up,
+                down_count=down,
+                neutral_count=neutral,
+                suspended_count=max(0, total - up - down - neutral),
+                total_count=total,
+                total_amount=q.amount,
+                total_volume=q.vol,
+                total_market_cap=market_cap,
+                limit_up_count=limit_up,
+                limit_down_count=limit_down,
+            )
         )
 
     def _collect_transaction_records(
@@ -659,41 +655,43 @@ class TdxClient:
 
         return all_recs
 
-    def get_fund_flow(self, market: Market, code: str) -> FundFlow:
+    def get_fund_flow(self, market: Market, code: str) -> pd.DataFrame:
         """获取个股当日资金流向分布（基于 L1 逐笔数据统计）。"""
         records = self._collect_transaction_records(
-            lambda start, page_size: self.get_transaction_data(market, code, start, page_size),
+            lambda start, page_size: self._execute(
+                GetTransactionDataCmd(market, code, start, page_size)
+            ),
             2000,
         )
-        return _classify_fund_flow(records)
+        return _to_df(_classify_fund_flow(records))
 
     def get_history_fund_flow(
         self, market: Market, code: str, start: int, count: int
-    ) -> list[HistoricalFundFlow]:
+    ) -> pd.DataFrame:
         """获取个股历史日线资金流向序列。
 
         优先走 Category 22 直连接口；若服务器返回空列表，则自动回退为
-        “日 K 线取日期 + 历史逐笔成交重算资金流”的兼容实现。
+        "日 K 线取日期 + 历史逐笔成交重算资金流"的兼容实现。
         """
         try:
             direct = self._execute(GetHistoryFundFlowCmd(market, code, start, count))
         except Exception:
             direct = []
         if direct:
-            return direct
+            return _to_df(direct)
 
-        bars = self.get_security_bars(market, code, KlineCategory.DAY, start, count)
+        bars = self._execute(GetSecurityBarsCmd(market, code, KlineCategory.DAY, start, count))
         results: list[HistoricalFundFlow] = []
         for bar in bars:
             date = _date_from_bar(bar)
             records = self._collect_transaction_records(
-                lambda page_start, page_size: self.get_history_transaction_data(
-                    market, code, date, page_start, page_size
+                lambda page_start, page_size: self._execute(
+                    GetHistoryTransactionDataCmd(market, code, date, page_start, page_size)
                 ),
                 800,
             )
             results.append(_historical_fund_flow_from_records(date, records))
-        return results
+        return _to_df(results)
 
 
 # ============================================================
@@ -822,10 +820,10 @@ class AsyncTdxClient:
     async def get_security_count(self, market: Market) -> int:
         return await self._execute(GetSecurityCountCmd(market))
 
-    async def get_security_list(self, market: Market, start: int) -> list[SecurityInfo]:
-        return await self._execute(GetSecurityListCmd(market, start))
+    async def get_security_list(self, market: Market, start: int) -> pd.DataFrame:
+        return _to_df(await self._execute(GetSecurityListCmd(market, start)))
 
-    async def get_security_list_all(self, pages: int | str = "all") -> list[SecurityInfo]:
+    async def get_security_list_all(self, pages: int | str = "all") -> pd.DataFrame:
         """获取沪深 A 股完整证券列表，并自动挂载行业信息。
 
         Args:
@@ -842,7 +840,7 @@ class AsyncTdxClient:
             cached = _load_cache()
             if cached is not None:
                 log.info("从缓存加载沪深 A 股列表，共 %d 只", len(cached))
-                return cached
+                return _to_df(cached)
 
         def _max_start(count: int) -> int:
             if pages == "all":
@@ -865,15 +863,18 @@ class AsyncTdxClient:
             total_pages = (limit + 999) // 1000
             for page_idx, start in enumerate(range(0, limit, 1000)):
                 try:
-                    stocks = await self.get_security_list(market, start)
+                    stocks = await self._execute(GetSecurityListCmd(market, start))
                 except Exception:
-                    log.warning("%s 第 %d/%d 页获取失败，跳过", market.name, page_idx + 1, total_pages)
+                    log.warning(
+                        "%s 第 %d/%d 页获取失败，跳过", market.name, page_idx + 1, total_pages
+                    )
                     continue
-                log.info("%s 第 %d/%d 页: %d 条", market.name, page_idx + 1, total_pages, len(stocks))
+                log.info(
+                    "%s 第 %d/%d 页: %d 条", market.name, page_idx + 1, total_pages, len(stocks)
+                )
                 for s in stocks:
-                    is_a_share = (
-                        (market == Market.SH and s.code.startswith(("60", "68")))
-                        or (market == Market.SZ and s.code.startswith(("00", "30")))
+                    is_a_share = (market == Market.SH and s.code.startswith(("60", "68"))) or (
+                        market == Market.SZ and s.code.startswith(("00", "30"))
                     )
                     if is_a_share:
                         if s.code in industry_map:
@@ -883,12 +884,10 @@ class AsyncTdxClient:
         log.info("沪深 A 股总数: %d", len(all_stocks))
         if pages == "all":
             _save_cache(all_stocks)
-        return all_stocks
+        return _to_df(all_stocks)
 
-    async def get_security_quotes(
-        self, stocks: list[tuple[Market, str]]
-    ) -> list[SecurityQuote]:
-        return await self._execute(GetSecurityQuotesCmd(stocks))
+    async def get_security_quotes(self, stocks: list[tuple[Market, str]]) -> pd.DataFrame:
+        return _to_df(await self._execute(GetSecurityQuotesCmd(stocks)))
 
     async def get_price_limits(
         self, market: Market, code: str, name: str, pre_close: float
@@ -898,8 +897,8 @@ class AsyncTdxClient:
         no_limit_window_days = get_no_limit_window_days(market, code, name)
         if no_limit_window_days > 0:
             try:
-                bars = await self.get_security_bars(
-                    market, code, KlineCategory.DAY, 0, no_limit_window_days + 1
+                bars = await self._execute(
+                    GetSecurityBarsCmd(market, code, KlineCategory.DAY, 0, no_limit_window_days + 1)
                 )
                 listed_days = len(bars)
             except Exception:
@@ -920,10 +919,9 @@ class AsyncTdxClient:
         category: KlineCategory,
         start: int,
         count: int = 800,
-    ) -> list[SecurityBar]:
-        return await self._execute(
-            GetSecurityBarsCmd(market, code, category, start, count)
-        )
+    ) -> pd.DataFrame:
+        df = _to_df(await self._execute(GetSecurityBarsCmd(market, code, category, start, count)))
+        return _merge_bar_datetime(df, category in _DAILY_PLUS)
 
     async def get_index_bars(
         self,
@@ -932,55 +930,50 @@ class AsyncTdxClient:
         category: KlineCategory,
         start: int,
         count: int = 800,
-    ) -> list[SecurityBar]:
-        return await self._execute(GetIndexBarsCmd(market, code, category, start, count))
+    ) -> pd.DataFrame:
+        df = _to_df(await self._execute(GetIndexBarsCmd(market, code, category, start, count)))
+        return _merge_bar_datetime(df, category in _DAILY_PLUS)
 
-    async def get_minute_time_data(self, market: Market, code: str) -> list[MinuteBar]:
+    async def get_minute_time_data(self, market: Market, code: str) -> pd.DataFrame:
         today = _today_in_shanghai()
-        try:
-            bars = await self.get_history_minute_time_data(market, code, today)
-            if bars:
-                return bars
-        except Exception:
-            pass
-        return await self._execute(GetMinuteTimeDataCmd(market, code))
+        bars = await self._execute(GetHistoryMinuteTimeDataCmd(market, code, today))
+        return _add_minute_datetime(_to_df(bars), today)
 
     async def get_history_minute_time_data(
         self, market: Market, code: str, date: int
-    ) -> list[MinuteBar]:
-        return await self._execute(GetHistoryMinuteTimeDataCmd(market, code, date))
+    ) -> pd.DataFrame:
+        bars = await self._execute(GetHistoryMinuteTimeDataCmd(market, code, date))
+        return _add_minute_datetime(_to_df(bars), date)
 
     async def get_transaction_data(
         self, market: Market, code: str, start: int, count: int = 800
-    ) -> list[TransactionRecord]:
-        return await self._execute(GetTransactionDataCmd(market, code, start, count))
+    ) -> pd.DataFrame:
+        df = _to_df(await self._execute(GetTransactionDataCmd(market, code, start, count)))
+        return _merge_txn_datetime(df, _today_in_shanghai())
 
     async def get_history_transaction_data(
         self, market: Market, code: str, date: int, start: int, count: int = 800
-    ) -> list[TransactionRecord]:
-        return await self._execute(
-            GetHistoryTransactionDataCmd(market, code, date, start, count)
+    ) -> pd.DataFrame:
+        df = _to_df(
+            await self._execute(GetHistoryTransactionDataCmd(market, code, date, start, count))
         )
+        return _merge_txn_datetime(df, date)
 
-    async def get_xdxr_info(self, market: Market, code: str) -> list[XdxrRecord]:
-        return await self._execute(GetXdxrInfoCmd(market, code))
+    async def get_xdxr_info(self, market: Market, code: str) -> pd.DataFrame:
+        return _to_df(await self._execute(GetXdxrInfoCmd(market, code)))
 
-    async def get_finance_info(self, market: Market, code: str) -> FinanceInfo:
-        return await self._execute(GetFinanceInfoCmd(market, code))
+    async def get_finance_info(self, market: Market, code: str) -> pd.DataFrame:
+        return _to_df(await self._execute(GetFinanceInfoCmd(market, code)))
 
-    async def get_company_info_category(
-        self, market: Market, code: str
-    ) -> list[CompanyInfoCategory]:
-        return await self._execute(GetCompanyInfoCategoryCmd(market, code))
+    async def get_company_info_category(self, market: Market, code: str) -> pd.DataFrame:
+        return _to_df(await self._execute(GetCompanyInfoCategoryCmd(market, code)))
 
     async def get_company_info_content(
         self, market: Market, code: str, filename: str, offset: int, length: int
     ) -> str:
-        return await self._execute(
-            GetCompanyInfoContentCmd(market, code, filename, offset, length)
-        )
+        return await self._execute(GetCompanyInfoContentCmd(market, code, filename, offset, length))
 
-    async def get_block_info(self, filename: str) -> list[TdxBlock]:
+    async def get_block_info(self, filename: str) -> pd.DataFrame:
         """获取并解析板块文件（行业、概念、风格等）。"""
         size, _hash = await self._execute(GetBlockInfoMetaCmd(filename))
         full_data = bytearray()
@@ -992,7 +985,7 @@ class AsyncTdxClient:
                 break
             full_data.extend(chunk)
             pos += len(chunk)
-        return parse_block_dat(bytes(full_data), filename)
+        return _to_df(parse_block_dat(bytes(full_data), filename))
 
     async def get_report_file(self, filename: str) -> bytes:
         """从服务器拉取大文件。"""
@@ -1032,23 +1025,17 @@ class AsyncTdxClient:
         finally:
             await conn.close()
 
-    async def get_financial_file_list(
-        self, host: str = CALC_HOSTS[0]
-    ) -> list[FinancialFileInfo]:
+    async def get_financial_file_list(self, host: str = CALC_HOSTS[0]) -> pd.DataFrame:
         """获取可用的历史专业财报文件列表（异步）。"""
         data = await self._async_download_from_host(host, "tdxfin/gpcw.txt")
         raw_list = parse_financial_file_list(data)
-        return [FinancialFileInfo(filename=f, hash=h, filesize=s) for f, h, s in raw_list]
+        return _to_df([FinancialFileInfo(filename=f, hash=h, filesize=s) for f, h, s in raw_list])
 
-    async def get_financial_file(
-        self, filename: str, host: str = CALC_HOSTS[0]
-    ) -> bytes:
+    async def get_financial_file(self, filename: str, host: str = CALC_HOSTS[0]) -> bytes:
         """从计算服务器下载财报 zip 文件（异步）。"""
         return await self._async_download_from_host(host, filename)
 
-    async def get_financial_records(
-        self, filename: str, host: str = CALC_HOSTS[0]
-    ) -> list[FinancialRecord]:
+    async def get_financial_records(self, filename: str, host: str = CALC_HOSTS[0]) -> pd.DataFrame:
         """下载财报 zip 并解析为记录列表（异步）。"""
         import io
         import re
@@ -1056,12 +1043,12 @@ class AsyncTdxClient:
 
         zip_data = await self.get_financial_file(filename, host)
         if not zip_data:
-            return []
+            return pd.DataFrame()
 
         with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
             dat_names = [n for n in zf.namelist() if n.endswith(".dat")]
             if not dat_names:
-                return []
+                return pd.DataFrame()
             dat_data = zf.read(dat_names[0])
 
         m = re.search(r"(\d{8})", filename)
@@ -1072,13 +1059,11 @@ class AsyncTdxClient:
         for code, market_byte, rdate, fields in raw_records:
             market = Market.SH if market_byte == b"\x01" else Market.SZ
             records.append(
-                FinancialRecord(
-                    code=code, market=market, report_date=rdate, fields=fields
-                )
+                FinancialRecord(code=code, market=market, report_date=rdate, fields=fields)
             )
-        return records
+        return _to_df(records)
 
-    async def get_market_stat(self) -> MarketStat:
+    async def get_market_stat(self) -> pd.DataFrame:
         """获取 A 股全市场涨跌统计概况（基于 880005 行情统计）。
 
         注意：
@@ -1086,9 +1071,11 @@ class AsyncTdxClient:
             用于保证计数守恒，不应视为协议已明确验证的停牌字段。
         """
         # 通达信中 880005 是全市场行情统计，880001 是总市值指数，880006 是涨跌停统计
-        quotes = await self.get_security_quotes([
-            (Market.SH, "880005"), (Market.SH, "880001"), (Market.SH, "880006"),
-        ])
+        quotes = await self._execute(
+            GetSecurityQuotesCmd(
+                [(Market.SH, "880005"), (Market.SH, "880001"), (Market.SH, "880006")]
+            )
+        )
         if not quotes:
             raise RuntimeError("无法获取市场统计数据")
         q = quotes[0]
@@ -1099,17 +1086,19 @@ class AsyncTdxClient:
         market_cap = quotes[1].price * 1e10 if len(quotes) > 1 else 0.0
         limit_down = int(quotes[2].open) if len(quotes) > 2 else 0
         limit_up = int(quotes[2].price) if len(quotes) > 2 else 0
-        return MarketStat(
-            up_count=up,
-            down_count=down,
-            neutral_count=neutral,
-            suspended_count=max(0, total - up - down - neutral),
-            total_count=total,
-            total_amount=q.amount,
-            total_volume=q.vol,
-            total_market_cap=market_cap,
-            limit_up_count=limit_up,
-            limit_down_count=limit_down,
+        return _to_df(
+            MarketStat(
+                up_count=up,
+                down_count=down,
+                neutral_count=neutral,
+                suspended_count=max(0, total - up - down - neutral),
+                total_count=total,
+                total_amount=q.amount,
+                total_volume=q.vol,
+                total_market_cap=market_cap,
+                limit_up_count=limit_up,
+                limit_down_count=limit_down,
+            )
         )
 
     async def _collect_transaction_records(
@@ -1155,40 +1144,42 @@ class AsyncTdxClient:
 
         return all_recs
 
-    async def get_fund_flow(self, market: Market, code: str) -> FundFlow:
+    async def get_fund_flow(self, market: Market, code: str) -> pd.DataFrame:
         """获取个股当日资金流向分布（基于 L1 逐笔数据统计）。"""
         records = await self._collect_transaction_records(
-            lambda start, page_size: self.get_transaction_data(
-                market, code, start, page_size
+            lambda start, page_size: self._execute(
+                GetTransactionDataCmd(market, code, start, page_size)
             ),
             2000,
         )
-        return _classify_fund_flow(records)
+        return _to_df(_classify_fund_flow(records))
 
     async def get_history_fund_flow(
         self, market: Market, code: str, start: int, count: int
-    ) -> list[HistoricalFundFlow]:
+    ) -> pd.DataFrame:
         """获取个股历史日线资金流向序列。
 
         优先走 Category 22 直连接口；若服务器返回空列表，则自动回退为
-        “日 K 线取日期 + 历史逐笔成交重算资金流”的兼容实现。
+        "日 K 线取日期 + 历史逐笔成交重算资金流"的兼容实现。
         """
         try:
             direct = await self._execute(GetHistoryFundFlowCmd(market, code, start, count))
         except Exception:
             direct = []
         if direct:
-            return direct
+            return _to_df(direct)
 
-        bars = await self.get_security_bars(market, code, KlineCategory.DAY, start, count)
+        bars = await self._execute(
+            GetSecurityBarsCmd(market, code, KlineCategory.DAY, start, count)
+        )
         results: list[HistoricalFundFlow] = []
         for bar in bars:
             date = _date_from_bar(bar)
             records = await self._collect_transaction_records(
-                lambda page_start, page_size: self.get_history_transaction_data(
-                    market, code, date, page_start, page_size
+                lambda page_start, page_size: self._execute(
+                    GetHistoryTransactionDataCmd(market, code, date, page_start, page_size)
                 ),
                 800,
             )
             results.append(_historical_fund_flow_from_records(date, records))
-        return results
+        return _to_df(results)

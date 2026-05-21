@@ -15,7 +15,9 @@
       "Bash(python3 *)",
       "Bash(where mypy *)",
       "Bash(pip list *)",
-      "Bash(uv run *)"
+      "Bash(uv run *)",
+      "Bash(git stash *)",
+      "Bash(dir /s /b src\\\\xmtdx)"
     ]
   }
 }

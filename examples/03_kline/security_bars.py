@@ -5,19 +5,9 @@ K 线类别:
   KlineCategory.DAY    / WEEK   / MONTH  / YEAR
 """
 
-import pandas as pd
-from easy_tdx import TdxClient, Market, KlineCategory
+from easy_tdx import KlineCategory, Market, TdxClient
 
 with TdxClient.from_best_host() as c:
-    bars = c.get_security_bars(Market.SZ, "002176", KlineCategory.DAY, 0, 100)
-    df = pd.DataFrame([{
-        "日期": f"{b.year}-{b.month:02d}-{b.day:02d}",
-        "开盘": b.open,
-        "最高": b.high,
-        "最低": b.low,
-        "收盘": b.close,
-        "成交量": b.vol,
-        "成交额": b.amount,
-    } for b in reversed(bars)])
-    print("上证指数 日K线:")
+    df = c.get_security_bars(Market.SZ, "002176", KlineCategory.DAY, 0, 100)
+    print("江特电机 日K线:")
     print(df.to_string(index=False))

@@ -1,7 +1,8 @@
 """演示：异步客户端连接与基本用法。"""
 
 import asyncio
-from easy_tdx import AsyncTdxClient, Market, KlineCategory
+
+from easy_tdx import AsyncTdxClient, KlineCategory, Market
 
 
 async def main():
@@ -12,13 +13,8 @@ async def main():
 
     # 自动优选服务器
     async with AsyncTdxClient.from_best_host() as c:
-        bars = await c.get_security_bars(
-            Market.SH, "600000", KlineCategory.DAY, 0, 5
-        )
-        for bar in bars:
-            print(f"{bar.year}-{bar.month:02d}-{bar.day:02d} "
-                  f"开:{bar.open:.2f} 高:{bar.high:.2f} "
-                  f"低:{bar.low:.2f} 收:{bar.close:.2f}")
+        df = await c.get_security_bars(Market.SH, "600000", KlineCategory.DAY, 0, 5)
+        print(df.to_string(index=False))
 
 
 asyncio.run(main())

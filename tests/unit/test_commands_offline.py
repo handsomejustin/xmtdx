@@ -4,6 +4,7 @@ fixtures/ 目录下每个 .hex 文件是一次真实服务器响应的 body（�
 对应的 .json 文件记录关键预期值，供手工核对。
 此测试文件直接断言解析结果，无需网络连接。
 """
+
 from __future__ import annotations
 
 import pathlib
@@ -19,6 +20,7 @@ def load_hex(name: str) -> bytes:
 # ---------------------------------------------------------------------------
 # security_count
 # ---------------------------------------------------------------------------
+
 
 def test_security_count_parse():
     from easy_tdx.commands.security_count import GetSecurityCountCmd
@@ -37,6 +39,7 @@ def test_security_count_parse():
 # ---------------------------------------------------------------------------
 # security_list
 # ---------------------------------------------------------------------------
+
 
 def test_security_list_parse():
     from easy_tdx.commands.security_list import GetSecurityListCmd
@@ -61,18 +64,15 @@ def test_security_list_pre_close_uses_tdx_float_for_a_share():
     from easy_tdx.commands.security_list import GetSecurityListCmd
     from easy_tdx.models.enums import Market
 
-    body = (
-        struct.pack("<H", 1)
-        + struct.pack(
-            "<6sH8s4sBI4s",
-            b"600000",
-            100,
-            "\u6d66\u53d1\u94f6\u884c".encode("gbk"),
-            b"\x00\x00\x00\x00",
-            2,
-            0x411B851F,
-            b"\x00\x00\x00\x00",
-        )
+    body = struct.pack("<H", 1) + struct.pack(
+        "<6sH8s4sBI4s",
+        b"600000",
+        100,
+        "\u6d66\u53d1\u94f6\u884c".encode("gbk"),
+        b"\x00\x00\x00\x00",
+        2,
+        0x411B851F,
+        b"\x00\x00\x00\x00",
     )
 
     record = GetSecurityListCmd(Market.SH, 24000).parse_response(body)[0]
@@ -96,6 +96,7 @@ def test_security_list_gbk_no_crash():
 # ---------------------------------------------------------------------------
 # security_bars
 # ---------------------------------------------------------------------------
+
 
 def test_security_bars_parse():
     from easy_tdx.commands.security_bars import GetSecurityBarsCmd
@@ -127,6 +128,7 @@ def test_security_bars_parse():
 # ---------------------------------------------------------------------------
 # security_quotes
 # ---------------------------------------------------------------------------
+
 
 def test_security_quotes_parse():
     from easy_tdx.commands.security_quotes import GetSecurityQuotesCmd
@@ -161,6 +163,7 @@ def test_security_quotes_parse():
 # minute_time
 # ---------------------------------------------------------------------------
 
+
 def test_minute_time_parse():
     from easy_tdx.commands.minute_time import GetMinuteTimeDataCmd
     from easy_tdx.models.enums import Market
@@ -174,20 +177,21 @@ def test_minute_time_parse():
     b0 = bars[0]
     assert isinstance(b0.price, float)
     assert isinstance(b0.vol, int)
-    # Bug #5 fix: unknown_1 is preserved, not discarded
-    assert hasattr(b0, "unknown_1")
-    assert isinstance(b0.unknown_1, int)
+    # Bug #5 fix: _unknown_1 is preserved, not discarded
+    assert hasattr(b0, "_unknown_1")
+    assert isinstance(b0._unknown_1, int)
     assert len(b0._raw) > 0
 
     # fixed values
     assert abs(b0.price - 0.01) < 0.001
     assert b0.vol == 48
-    assert b0.unknown_1 == 54
+    assert b0._unknown_1 == 54
 
 
 # ---------------------------------------------------------------------------
 # history_minute_time
 # ---------------------------------------------------------------------------
+
 
 def test_history_minute_time_parse():
     from easy_tdx.commands.minute_time import GetHistoryMinuteTimeDataCmd
@@ -202,13 +206,14 @@ def test_history_minute_time_parse():
     b0 = bars[0]
     assert abs(b0.price - 10.29) < 0.01
     assert b0.vol == 10044
-    assert hasattr(b0, "unknown_1")
+    assert hasattr(b0, "_unknown_1")
     assert len(b0._raw) > 0
 
 
 # ---------------------------------------------------------------------------
 # transaction (current day)
 # ---------------------------------------------------------------------------
+
 
 def test_transaction_parse():
     from easy_tdx.commands.transaction import GetTransactionDataCmd
@@ -239,6 +244,7 @@ def test_transaction_parse():
 # history_transaction
 # ---------------------------------------------------------------------------
 
+
 def test_history_transaction_parse():
     from easy_tdx.commands.transaction import GetHistoryTransactionDataCmd
     from easy_tdx.models.enums import Market
@@ -265,6 +271,7 @@ def test_history_transaction_parse():
 # ---------------------------------------------------------------------------
 # xdxr_info
 # ---------------------------------------------------------------------------
+
 
 def test_xdxr_info_parse():
     from easy_tdx.commands.xdxr_info import GetXdxrInfoCmd
@@ -329,6 +336,7 @@ def test_xdxr_info_category_1_normalizes_per_10_share_fields():
 # finance_info
 # ---------------------------------------------------------------------------
 
+
 def test_finance_info_parse():
     from easy_tdx.commands.finance_info import GetFinanceInfoCmd
     from easy_tdx.models.enums import Market
@@ -354,6 +362,7 @@ def test_finance_info_parse():
 # company_info_category
 # ---------------------------------------------------------------------------
 
+
 def test_company_info_category_parse():
     from easy_tdx.commands.company_info import GetCompanyInfoCategoryCmd
     from easy_tdx.models.enums import Market
@@ -374,6 +383,7 @@ def test_company_info_category_parse():
 # ---------------------------------------------------------------------------
 # company_info_content
 # ---------------------------------------------------------------------------
+
 
 def test_company_info_content_parse():
     from easy_tdx.commands.company_info import GetCompanyInfoContentCmd

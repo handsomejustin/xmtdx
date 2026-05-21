@@ -54,8 +54,15 @@ if need_fetch:
     print(f"\n正在连接服务器获取 {len(need_fetch)} 个板块文件...")
     with TdxClient.from_best_host() as c:
         for name in need_fetch:
-            blocks = c.get_block_info(name)
-            _print_blocks(blocks, f"{block_labels[name]} ({name}, 网络)")
+            df = c.get_block_info(name)
+            print(f"\n{block_labels[name]} ({name}, 网络) ({len(df)} 个板块):")
+            for _, row in df.head(5).iterrows():
+                codes = row["codes"]
+                codes_preview = ", ".join(str(c) for c in codes[:5])
+                suffix = "..." if len(codes) > 5 else ""
+                print(f"  {row['name']} ({row['count']}只): {codes_preview}{suffix}")
+            if len(df) > 5:
+                print(f"  ... 还有 {len(df) - 5} 个板块")
 
 # --- 自定义板块 ---
 print(f"\n{'=' * 60}")
